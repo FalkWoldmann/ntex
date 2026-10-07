@@ -1,9 +1,10 @@
 #[cfg(unix)]
 use std::os::unix::net::UnixStream as OsUnixStream;
 use std::pin::Pin;
-use std::sync::{Arc, atomic::AtomicBool, atomic::Ordering};
+use std::sync::{Arc, OnceLock, atomic::AtomicBool, atomic::Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
+pub use compio_driver::ProactorBuilder;
 use compio_runtime::Runtime;
 use ntex_io::Io;
 use ntex_service::cfg::SharedCfg;
@@ -46,11 +47,26 @@ impl Drop for ResetGuard {
     }
 }
 
+static PROACTOR: OnceLock<ProactorBuilder> = OnceLock::new();
+
+/// Sets the compio [`ProactorBuilder`] that every compio runtime started by
+/// ntex is built with, for `io_uring` setup flags such as `coop_taskrun`.
+///
+/// Call it before the system starts. Only the first call takes effect; it
+/// returns `false` if a builder was already set.
+pub fn set_proactor_builder(builder: ProactorBuilder) -> bool {
+    PROACTOR.set(builder).is_ok()
+}
+
 /// Runs the provided future, blocking the current thread until the future
 /// completes.
 pub(crate) fn block_on<F: Future<Output = ()>>(fut: F) {
     let _reset = ResetGuard;
-    let rt = RtGuard(Runtime::new().unwrap());
+    let rt = match PROACTOR.get() {
+        Some(builder) => Runtime::builder().with_proactor(builder.clone()).build(),
+        None => Runtime::new(),
+    };
+    let rt = RtGuard(rt.unwrap());
     log::info!("Starting compio runtime, driver {:?}", rt.0.driver_type());
     rt.0.block_on(PollWhenWoken {
         fut: Box::pin(fut),
